@@ -31,7 +31,62 @@ from sae_bench.sae_bench_utils import (
     get_sae_bench_version,
     get_sae_lens_version,
 )
-from sae_bench.sae_bench_utils.sae_selection_utils import get_saes_from_regex
+from sae_bench.sae_bench_utils.sae_selection_utils import (
+    get_saes_from_regex,
+)
+
+
+def create_config_and_selected_saes(
+    args,
+) -> tuple[AbsorptionEvalConfig, list[tuple[str, str]] | list[tuple[str, SAE]]]:
+    from sae_lens.sae import SAE
+
+    config = AbsorptionEvalConfig(
+        random_seed=args.random_seed,
+        f1_jump_threshold=args.f1_jump_threshold,
+        max_k_value=args.max_k_value,
+        prompt_template=args.prompt_template,
+        prompt_token_pos=args.prompt_token_pos,
+        model_name=args.model_name,
+        k_sparse_probe_l1_decay=args.k_sparse_probe_l1_decay,
+        k_sparse_probe_batch_size=args.k_sparse_probe_batch_size,
+    )
+
+    if args.llm_batch_size is not None:
+        config.llm_batch_size = args.llm_batch_size
+    else:
+        config.llm_batch_size = activation_collection.LLM_NAME_TO_BATCH_SIZE[
+            config.model_name
+        ]
+    if args.llm_dtype is not None:
+        config.llm_dtype = args.llm_dtype
+    else:
+        config.llm_dtype = activation_collection.LLM_NAME_TO_DTYPE[config.model_name]
+
+    if args.random_seed is not None:
+        config.random_seed = args.random_seed
+
+    if args.local_sae_path is not None:
+        # Load local SAE
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sae = SAE.load_from_disk(args.local_sae_path, device=device)
+        selected_saes = [("local_sae", sae)]
+        print(f"Loaded local SAE from {args.local_sae_path}")
+    else:
+        assert (
+            args.sae_regex_pattern is not None and args.sae_block_pattern is not None
+        ), (
+            "Must provide either --local_sae_path or both --sae_regex_pattern and --sae_block_pattern"
+        )
+        selected_saes = get_saes_from_regex(
+            args.sae_regex_pattern, args.sae_block_pattern
+        )
+        assert len(selected_saes) > 0, "No SAEs selected"
+        releases = set([release for release, _ in selected_saes])
+        print(f"Selected SAEs from releases: {releases}")
+        for release, sae in selected_saes:
+            print(f"Sample SAEs: {release}, {sae}")
+    return config, selected_saes
 
 
 def run_eval(
@@ -267,13 +322,13 @@ def arg_parser():
     parser.add_argument(
         "--sae_regex_pattern",
         type=str,
-        required=True,
+        required=False,
         help="Regex pattern for SAE selection",
     )
     parser.add_argument(
         "--sae_block_pattern",
         type=str,
-        required=True,
+        required=False,
         help="Regex pattern for SAE block selection",
     )
     parser.add_argument(
@@ -307,54 +362,17 @@ def arg_parser():
         default=default_config.k_sparse_probe_batch_size,
         help="L1 decay for k-sparse probes.",
     )
-
     parser.add_argument(
         "--force_rerun", action="store_true", help="Force rerun of experiments"
     )
-
-    return parser
-
-
-def create_config_and_selected_saes(
-    args,
-) -> tuple[AbsorptionEvalConfig, list[tuple[str, str]]]:
-    config = AbsorptionEvalConfig(
-        random_seed=args.random_seed,
-        f1_jump_threshold=args.f1_jump_threshold,
-        max_k_value=args.max_k_value,
-        prompt_template=args.prompt_template,
-        prompt_token_pos=args.prompt_token_pos,
-        model_name=args.model_name,
-        k_sparse_probe_l1_decay=args.k_sparse_probe_l1_decay,
-        k_sparse_probe_batch_size=args.k_sparse_probe_batch_size,
+    parser.add_argument(
+        "--local_sae_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to a local SAE checkpoint directory. If specified, overrides regex selection.",
     )
-
-    if args.llm_batch_size is not None:
-        config.llm_batch_size = args.llm_batch_size
-    else:
-        config.llm_batch_size = activation_collection.LLM_NAME_TO_BATCH_SIZE[
-            config.model_name
-        ]
-
-    if args.llm_dtype is not None:
-        config.llm_dtype = args.llm_dtype
-    else:
-        config.llm_dtype = activation_collection.LLM_NAME_TO_DTYPE[config.model_name]
-
-    if args.random_seed is not None:
-        config.random_seed = args.random_seed
-
-    selected_saes = get_saes_from_regex(args.sae_regex_pattern, args.sae_block_pattern)
-    assert len(selected_saes) > 0, "No SAEs selected"
-
-    releases = set([release for release, _ in selected_saes])
-
-    print(f"Selected SAEs from releases: {releases}")
-
-    for release, sae in selected_saes:
-        print(f"Sample SAEs: {release}, {sae}")
-
-    return config, selected_saes
+    return parser
 
 
 if __name__ == "__main__":
@@ -362,6 +380,10 @@ if __name__ == "__main__":
     python evals/absorption/main.py \
     --sae_regex_pattern "sae_bench_pythia70m_sweep_standard_ctx128_0712" \
     --sae_block_pattern "blocks.4.hook_resid_post__trainer_10" \
+    --model_name pythia-70m-deduped
+    OR
+    python evals/absorption/main.py \
+    --local_sae_path /path/to/your/local/sae \
     --model_name pythia-70m-deduped
     """
     args = arg_parser().parse_args()

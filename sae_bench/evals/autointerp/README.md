@@ -1,6 +1,6 @@
 # AutoInterp
 
-This eval requires the creation of `openai_api_key.txt`, which should be located at `SAEBench/`.
+This eval requires setting the `OPENAI_API_KEY` environment variable in your `.env` file.
 
 ## File structure
 

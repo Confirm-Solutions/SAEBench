@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Literal, TypeAlias
 
 import torch
+from dotenv import load_dotenv
 from openai import OpenAI
 from sae_lens import SAE
 from tabulate import tabulate
@@ -38,9 +39,7 @@ from sae_bench.sae_bench_utils.indexing_utils import (
     get_k_largest_indices,
     index_with_buffer,
 )
-from sae_bench.sae_bench_utils.sae_selection_utils import (
-    get_saes_from_regex,
-)
+from sae_bench.sae_bench_utils.sae_selection_utils import get_saes_from_regex
 
 Messages: TypeAlias = list[dict[Literal["role", "content"], str]]
 
@@ -699,15 +698,26 @@ def create_config_and_selected_saes(
     if args.random_seed is not None:
         config.random_seed = args.random_seed
 
-    selected_saes = get_saes_from_regex(args.sae_regex_pattern, args.sae_block_pattern)
-    assert len(selected_saes) > 0, "No SAEs selected"
-
-    releases = set([release for release, _ in selected_saes])
-
-    print(f"Selected SAEs from releases: {releases}")
-
-    for release, sae in selected_saes:
-        print(f"Sample SAEs: {release}, {sae}")
+    if args.local_sae_path is not None:
+        # Load local SAE
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sae = SAE.load_from_disk(args.local_sae_path, device=device)
+        selected_saes = [("local_sae", sae)]
+        print(f"Loaded local SAE from {args.local_sae_path}")
+    else:
+        assert (
+            args.sae_regex_pattern is not None and args.sae_block_pattern is not None
+        ), (
+            "Must provide either --local_sae_path or both --sae_regex_pattern and --sae_block_pattern"
+        )
+        selected_saes = get_saes_from_regex(
+            args.sae_regex_pattern, args.sae_block_pattern
+        )
+        assert len(selected_saes) > 0, "No SAEs selected"
+        releases = set([release for release, _ in selected_saes])
+        print(f"Selected SAEs from releases: {releases}")
+        for release, sae in selected_saes:
+            print(f"Sample SAEs: {release}, {sae}")
 
     return config, selected_saes
 
@@ -720,8 +730,14 @@ def arg_parser():
     parser.add_argument(
         "--sae_regex_pattern",
         type=str,
-        required=True,
+        required=False,
         help="Regex pattern for SAE selection",
+    )
+    parser.add_argument(
+        "--local_sae_path",
+        type=str,
+        required=False,
+        help="Path to a local SAE checkpoint directory. If specified, overrides regex selection.",
     )
     parser.add_argument(
         "--sae_block_pattern",
@@ -774,6 +790,11 @@ if __name__ == "__main__":
     --model_name gemma-2-2b
 
     """
+    load_dotenv(override=True)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise Exception("Please set OPENAI_API_KEY in your .env file")
+
     args = arg_parser().parse_args()
     device = general_utils.setup_environment()
 
@@ -785,12 +806,6 @@ if __name__ == "__main__":
 
     # create output folder
     os.makedirs(args.output_folder, exist_ok=True)
-
-    try:
-        with open("openai_api_key.txt") as f:
-            api_key = f.read().strip()
-    except FileNotFoundError:
-        raise Exception("Please create openai_api_key.txt with your API key")
 
     # run the evaluation on all selected SAEs
     results_dict = run_eval(

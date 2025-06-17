@@ -1,5 +1,9 @@
 import json
 import os
+import time
+from dotenv import load_dotenv
+from sae_lens import SAE
+from transformer_lens import HookedTransformer
 
 import torch
 from huggingface_hub import snapshot_download
@@ -19,6 +23,8 @@ import sae_bench.evals.scr_and_tpp.main as scr_and_tpp
 import sae_bench.evals.sparse_probing.main as sparse_probing
 import sae_bench.evals.unlearning.main as unlearning
 import sae_bench.sae_bench_utils.general_utils as general_utils
+from sae_bench.evals.autointerp.eval_config import AutoInterpEvalConfig
+from sae_bench.evals.autointerp.main import run_eval
 
 MODEL_CONFIGS = {
     "pythia-70m-deduped": {
@@ -180,15 +186,13 @@ def run_evals(
         ),
         "autointerp": (
             lambda selected_saes, is_final: autointerp.run_eval(
-                autointerp.AutoInterpEvalConfig(
-                    model_name=model_name,
+                AutoInterpEvalConfig(
                     random_seed=random_seed,
-                    llm_batch_size=llm_batch_size,
-                    llm_dtype=llm_dtype,
+                    model_name=model_name,
                 ),
                 selected_saes,
                 device,
-                api_key,  # type: ignore
+                api_key,
                 "eval_results/autointerp",
                 force_rerun,
             )
@@ -352,84 +356,45 @@ def run_evals(
 
 
 if __name__ == "__main__":
-    """
-    This will run all evaluations on all selected dictionary_learning SAEs within the specified HuggingFace repos.
-    Set the model_name(s) and repo_id(s) in `repos`.
-    Also specify the eval types you want to run in `eval_types`.
-    You can also specify any keywords to exclude/include in the SAE filenames using `exclude_keywords` and `include_keywords`.
-    NOTE: If your model (with associated model_name and batch sizes) is not in the MODEL_CONFIGS dictionary, you will need to add it.
-    This relies on each SAE being located in a folder which contains an ae.pt file and a config.json file (which is the default save format in dictionary_learning).
-    Running this script as is should run SAE Bench Pythia and Gemma SAEs.
-    """
-    RANDOM_SEED = 42
+    load_dotenv(override=True)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise Exception("Please set OPENAI_API_KEY in your .env file")
 
     device = general_utils.setup_environment()
 
-    # Select your eval types here.
-    # Note: Unlearning is not recommended for models with < 2B parameters and we recommend an instruct tuned model
-    # Unlearning will also require requesting permission for the WMDP dataset (see unlearning/README.md)
-    # Absorption not recommended for models < 2B parameters
-    eval_types = [
-        "absorption",
-        "core",
-        "scr",
-        "tpp",
-        "sparse_probing",
-        "autointerp",
-        # "unlearning",
-        "ravel",
-    ]
+    start_time = time.time()
 
-    if "autointerp" in eval_types:
-        try:
-            with open("openai_api_key.txt") as f:
-                api_key = f.read().strip()
-        except FileNotFoundError:
-            raise Exception("Please create openai_api_key.txt with your API key")
-    else:
-        api_key = None
+    random_seed = 42
+    output_folder = "eval_results/autointerp"
 
-    if "unlearning" in eval_types:
-        if not os.path.exists(
-            "./sae_bench/evals/unlearning/data/bio-forget-corpus.jsonl"
-        ):
-            raise Exception(
-                "Please download bio-forget-corpus.jsonl for unlearning evaluation"
-            )
+    model_name = "pythia-70m-deduped"
+    hook_layer = 4
 
-    repos = [
-        (
-            "adamkarvonen/saebench_pythia-160m-deduped_width-2pow14_date-0108",
-            "pythia-160m-deduped",
-        ),
-        ("canrager/saebench_gemma-2-2b_width-2pow14_date-0107", "gemma-2-2b"),
-    ]
-    exclude_keywords = ["checkpoints"]
-    include_keywords = []
+    sae = SAE.from_pretrained(
+        "sae_bench_pythia70m_sweep_standard_ctx128_0712",
+        "blocks.4.hook_resid_post__trainer_10",
+    )
+    selected_saes = [("sae_bench_pythia70m_sweep_standard_ctx128_0712", sae)]
 
-    for repo_id, model_name in repos:
-        print(f"\n\n\nEvaluating {model_name} with {repo_id}\n\n\n")
+    config = AutoInterpEvalConfig(
+        random_seed=random_seed,
+        model_name=model_name,
+    )
 
-        llm_batch_size = MODEL_CONFIGS[model_name]["batch_size"]
-        str_dtype = MODEL_CONFIGS[model_name]["dtype"]
-        torch_dtype = general_utils.str_to_dtype(str_dtype)
+    # create output folder
+    os.makedirs(output_folder, exist_ok=True)
 
-        sae_locations = get_all_hf_repo_autoencoders(repo_id)
+    # run the evaluation on all selected SAEs
+    results_dict = run_eval(
+        config,
+        selected_saes,
+        device,
+        api_key,
+        output_folder,
+        force_rerun=True,
+    )
 
-        sae_locations = general_utils.filter_keywords(
-            sae_locations,
-            exclude_keywords=exclude_keywords,
-            include_keywords=include_keywords,
-        )
+    end_time = time.time()
 
-        run_evals(
-            repo_id=repo_id,
-            model_name=model_name,
-            sae_locations=sae_locations,
-            llm_batch_size=llm_batch_size,
-            llm_dtype=str_dtype,
-            device=device,
-            eval_types=eval_types,
-            api_key=api_key,
-            random_seed=RANDOM_SEED,
-        )
+    print(f"Finished evaluation in {end_time - start_time} seconds")

@@ -1,4 +1,8 @@
 import os
+import time
+from dotenv import load_dotenv
+from sae_lens import SAE
+from transformer_lens import HookedTransformer
 from typing import Any
 
 import torch
@@ -12,6 +16,9 @@ import sae_bench.evals.scr_and_tpp.main as scr_and_tpp
 import sae_bench.evals.sparse_probing.main as sparse_probing
 import sae_bench.evals.unlearning.main as unlearning
 import sae_bench.sae_bench_utils.general_utils as general_utils
+
+from sae_bench.evals.autointerp.eval_config import AutoInterpEvalConfig
+from sae_bench.evals.autointerp.main import run_eval
 
 RANDOM_SEED = 42
 
@@ -214,87 +221,45 @@ def run_evals(
 
 
 if __name__ == "__main__":
-    import sae_bench.custom_saes.identity_sae as identity_sae
+    load_dotenv(override=True)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise Exception("Please set OPENAI_API_KEY in your .env file")
 
     device = general_utils.setup_environment()
 
+    start_time = time.time()
+
+    random_seed = 42
+    output_folder = "eval_results/autointerp"
+
     model_name = "pythia-70m-deduped"
-    model_name = "gemma-2-2b"
-    d_model = MODEL_CONFIGS[model_name]["d_model"]
-    llm_batch_size = MODEL_CONFIGS[model_name]["batch_size"]
-    llm_dtype = MODEL_CONFIGS[model_name]["dtype"]
+    hook_layer = 4
 
-    # Note: Unlearning is not recommended for models with < 2B parameters and we recommend an instruct tuned model
-    # Unlearning will also require requesting permission for the WMDP dataset (see unlearning/README.md)
-    # Absorption not recommended for models < 2B parameters
+    sae = SAE.from_pretrained(
+        "sae_bench_pythia70m_sweep_standard_ctx128_0712",
+        "blocks.4.hook_resid_post__trainer_10",
+    )
+    selected_saes = [("sae_bench_pythia70m_sweep_standard_ctx128_0712", sae)]
 
-    # Select your eval types here.
-    eval_types = [
-        "absorption",
-        "autointerp",
-        "core",
-        "ravel",
-        "scr",
-        "tpp",
-        "sparse_probing",
-        "unlearning",
-    ]
+    config = AutoInterpEvalConfig(
+        random_seed=random_seed,
+        model_name=model_name,
+    )
 
-    if "autointerp" in eval_types:
-        try:
-            with open("openai_api_key.txt") as f:
-                api_key = f.read().strip()
-        except FileNotFoundError:
-            raise Exception("Please create openai_api_key.txt with your API key")
-    else:
-        api_key = None
+    # create output folder
+    os.makedirs(output_folder, exist_ok=True)
 
-    if "unlearning" in eval_types:
-        if not os.path.exists(
-            "./sae_bench/evals/unlearning/data/bio-forget-corpus.jsonl"
-        ):
-            raise Exception(
-                "Please download bio-forget-corpus.jsonl for unlearning evaluation"
-            )
+    # run the evaluation on all selected SAEs
+    results_dict = run_eval(
+        config,
+        selected_saes,
+        device,
+        api_key,
+        output_folder,
+        force_rerun=True,
+    )
 
-    # If evaluating multiple SAEs on the same layer, set save_activations to True
-    # This will require at least 100GB of disk space
-    save_activations = False
+    end_time = time.time()
 
-    for hook_layer in MODEL_CONFIGS[model_name]["layers"]:
-        sae = identity_sae.IdentitySAE(
-            d_model,
-            model_name,
-            hook_layer,
-            device=torch.device(device),
-            dtype=general_utils.str_to_dtype(llm_dtype),
-        )  # type: ignore
-        selected_saes = [(f"{model_name}_layer_{hook_layer}_identity_sae", sae)]
-
-        # This will evaluate PCA SAEs
-        # sae = pca_sae.PCASAE(
-        #     d_model,
-        #     model_name,
-        #     hook_layer,
-        #     device=torch.device(device),
-        #     dtype=general_utils.str_to_dtype(llm_dtype),
-        # )
-        # filename = f"pca_gemma-2-2b_blocks.{hook_layer}.hook_resid_post.pt"
-        # sae.load_from_file(filename)
-        # selected_saes = [(f"{model_name}_layer_{hook_layer}_pca_sae", sae)]
-
-        for sae_name, sae in selected_saes:
-            sae = sae.to(dtype=general_utils.str_to_dtype(llm_dtype))
-            sae.cfg.dtype = llm_dtype
-
-        run_evals(
-            model_name,
-            selected_saes,
-            llm_batch_size,
-            llm_dtype,
-            device,
-            eval_types=eval_types,
-            api_key=api_key,
-            force_rerun=False,
-            save_activations=False,
-        )
+    print(f"Finished evaluation in {end_time - start_time} seconds")

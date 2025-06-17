@@ -1,4 +1,62 @@
-# SAE Bench
+# SAEBench
+
+SAEBench is a comprehensive benchmarking suite for Sparse Autoencoders (SAEs) in language models. It provides a standardized way to evaluate and compare different SAE implementations and configurations.
+
+## Setup
+
+1. Install the package:
+```bash
+pip install -e .
+```
+
+2. Create a `.env` file in the root directory with your OpenAI API key:
+```
+OPENAI_API_KEY=your_api_key_here
+```
+
+## Features
+
+- Core evaluation metrics for SAEs
+- AutoInterp evaluation for interpretability
+- Unlearning evaluation
+- Custom SAE support
+- Comprehensive logging and visualization tools
+
+## Usage
+
+### Core Evaluation
+
+```bash
+python -m sae_bench.evals.core.main [SAE_REGEX_PATTERN] [SAE_BLOCK_PATTERN] [options]
+```
+
+### AutoInterp Evaluation
+
+```bash
+python -m sae_bench.evals.autointerp.main [SAE_REGEX_PATTERN] [SAE_BLOCK_PATTERN] [options]
+```
+
+### Unlearning Evaluation
+
+```bash
+python -m sae_bench.evals.unlearning.main [SAE_REGEX_PATTERN] [SAE_BLOCK_PATTERN] [options]
+```
+
+## Requirements
+
+- Python 3.8+
+- PyTorch
+- TransformerLens
+- SAELens
+- OpenAI API key (for AutoInterp evaluation)
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Table of Contents
 
@@ -90,14 +148,14 @@ We currently have a suite of SAE Bench SAEs on layer 8 of Pythia-160M and layer 
 
 ## Using New Models / Adjusting VRAM Usage
 
-SAE Bench primarily supports Pythia and Gemma models out of the box. If you want to use a different model, you’ll need to make a couple of minor changes:
+SAE Bench primarily supports Pythia and Gemma models out of the box. If you want to use a different model, you'll need to make a couple of minor changes:
 
 1. **Set Batch Size and `dtype`**  
    Update the batch size and `dtype` for your model in [`activation_collection.py`](https://github.com/adamkarvonen/SAEBench/blob/main/sae_bench/sae_bench_utils/activation_collection.py#L14-L30).  
    All evaluations use a roughly constant batch size, scaled appropriately using these constants. The defaults are tuned for running Gemma-2-2B on a 24GB GPU. If you're using a GPU with more VRAM, consider increasing the batch size to improve utilization. Note: We recommend that you ensure the batch size is constant for all SAEs you are evaluating, as some evaluations have steps that may get slightly different results with a varying batch size - for example, such as when training a binary mask.
 
 2. **(RAVEL Only) Add Submodule String**  
-   If you're running the RAVEL evaluation, you'll also need to [add the submodule string](https://github.com/adamkarvonen/SAEBench/blob/main/sae_bench/sae_bench_utils/activation_collection.py#L33-L39) for your model. There’s an example of how to do this in the docstring.
+   If you're running the RAVEL evaluation, you'll also need to [add the submodule string](https://github.com/adamkarvonen/SAEBench/blob/main/sae_bench/sae_bench_utils/activation_collection.py#L33-L39) for your model. There's an example of how to do this in the docstring.
 
 ## Configuration Settings
 

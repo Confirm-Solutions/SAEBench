@@ -1,60 +1,53 @@
-from pathlib import Path
+import os
+import time
+from dotenv import load_dotenv
+from sae_lens import SAE
+from transformer_lens import HookedTransformer
 
-import torch
-
+import sae_bench.sae_bench_utils.general_utils as general_utils
 from sae_bench.evals.autointerp.eval_config import AutoInterpEvalConfig
 from sae_bench.evals.autointerp.main import run_eval
 
-with open("openai_api_key.txt") as f:
-    api_key = f.read().strip()
+if __name__ == "__main__":
+    load_dotenv(override=True)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise Exception("Please set OPENAI_API_KEY in your .env file")
 
-device = torch.device(
-    "mps"
-    if torch.backends.mps.is_available()
-    else "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
+    device = general_utils.setup_environment()
 
-selected_saes = [("gpt2-small-res-jb", "blocks.7.hook_resid_pre")]
-torch.set_grad_enabled(False)
+    start_time = time.time()
 
-# ! Demo 1: just 4 specially chosen latents. Must specify n_latents=None explicitly. Also must specify llm_batch_size and llm_batch_size when not running from main.py.
-cfg = AutoInterpEvalConfig(
-    model_name="gpt2-small",
-    n_latents=None,
-    override_latents=[9, 11, 15, 16873],
-    llm_dtype="bfloat16",
-    llm_batch_size=32,
-)
-save_logs_path = Path(__file__).parent / "logs_4.txt"
-save_logs_path.unlink(missing_ok=True)
-output_path = Path(__file__).parent / "data"
-output_path.mkdir(exist_ok=True)
-results = run_eval(
-    cfg,
-    selected_saes,
-    str(device),
-    api_key,
-    output_path=str(output_path),
-    save_logs_path=str(save_logs_path),
-)  # type: ignore
-print(results)
+    random_seed = 42
+    output_folder = "eval_results/autointerp"
 
-# ! Demo 2: 100 randomly chosen latents
-cfg = AutoInterpEvalConfig(
-    model_name="gpt2-small", n_latents=100, llm_dtype="bfloat16", llm_batch_size=32
-)
-save_logs_path = Path(__file__).parent / "logs_100.txt"
-save_logs_path.unlink(missing_ok=True)
-results = run_eval(
-    cfg,
-    selected_saes,
-    str(device),
-    api_key,
-    output_path=str(output_path),
-    save_logs_path=str(save_logs_path),
-)  # type: ignore
-print(results)
+    model_name = "pythia-70m-deduped"
+    hook_layer = 4
 
-# python demo.py
+    sae = SAE.from_pretrained(
+        "sae_bench_pythia70m_sweep_standard_ctx128_0712",
+        "blocks.4.hook_resid_post__trainer_10",
+    )
+    selected_saes = [("sae_bench_pythia70m_sweep_standard_ctx128_0712", sae)]
+
+    config = AutoInterpEvalConfig(
+        random_seed=random_seed,
+        model_name=model_name,
+    )
+
+    # create output folder
+    os.makedirs(output_folder, exist_ok=True)
+
+    # run the evaluation on all selected SAEs
+    results_dict = run_eval(
+        config,
+        selected_saes,
+        device,
+        api_key,
+        output_folder,
+        force_rerun=True,
+    )
+
+    end_time = time.time()
+
+    print(f"Finished evaluation in {end_time - start_time} seconds")

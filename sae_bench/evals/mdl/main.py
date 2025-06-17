@@ -28,9 +28,7 @@ from sae_bench.sae_bench_utils import (
     get_sae_bench_version,
     get_sae_lens_version,
 )
-from sae_bench.sae_bench_utils.sae_selection_utils import (
-    get_saes_from_regex,
-)
+from sae_bench.sae_bench_utils.sae_selection_utils import get_saes_from_regex
 
 EVAL_TYPE = "mdl"
 

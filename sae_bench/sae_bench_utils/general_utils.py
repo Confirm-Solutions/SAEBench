@@ -133,7 +133,13 @@ def load_and_format_sae(
     sae_release_or_unique_id: str, sae_object_or_sae_lens_id: str | SAE, device: str
 ) -> tuple[str, SAE, torch.Tensor | None] | None:
     """Handle both pretrained SAEs (identified by string) and custom SAEs (passed as objects)"""
-    if isinstance(sae_object_or_sae_lens_id, str):
+    if os.path.exists(sae_release_or_unique_id):
+        sae = SAE.load_from_disk(sae_release_or_unique_id, device=device)
+        sae_id = "local_sae"
+        sparsity = None
+        check_decoder_norms(sae.W_dec.data)
+        return sae_id, sae, sparsity
+    elif isinstance(sae_object_or_sae_lens_id, str):
         sae, _, sparsity = SAE.from_pretrained(
             release=sae_release_or_unique_id,
             sae_id=sae_object_or_sae_lens_id,
