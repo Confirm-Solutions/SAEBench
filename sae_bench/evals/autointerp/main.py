@@ -315,10 +315,15 @@ class AutoInterp:
             assert message.keys() == {"content", "role"}
             assert message["role"] in ["system", "user", "assistant"]
 
-        client = OpenAI(api_key=self.api_key)
+        if self.cfg.use_local_endpoint:
+            _base_url = "http://0.0.0.0:8000"
+        else:
+            _base_url = "https://api.openai.com/v1"
+
+        client = OpenAI(api_key=self.api_key, base_url=_base_url)
 
         result = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=self.cfg.autointerp_lm_model,
             messages=messages,  # type: ignore
             n=n_completions,
             max_tokens=max_tokens,

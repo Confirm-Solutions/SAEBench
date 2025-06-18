@@ -79,6 +79,16 @@ class AutoInterpEvalConfig:
         title="LLM Data Type",
         description="LLM data type. This is set by default in the main script, or it can be set with a command line argument.",
     )
+    use_local_endpoint: bool = Field(
+        default=False,
+        title="Use Local Endpoint",
+        description="Whether to use the local endpoint for the LLM",
+    )
+    autointerp_lm_model: str = Field(
+        default="gpt-4o-mini",
+        title="AutoInterp LM Model",
+        description="The model to use for the autointerp LM",
+    )
 
     # Main autointerp params
     buffer: int = Field(
