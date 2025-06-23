@@ -315,10 +315,17 @@ class AutoInterp:
             assert message.keys() == {"content", "role"}
             assert message["role"] in ["system", "user", "assistant"]
 
-        client = OpenAI(api_key=self.api_key)
+        # Use config to determine API base_url and model
+        if hasattr(self.cfg, "local_api") and self.cfg.local_api:
+            base_url = "http://localhost:8000/v1"
+        else:
+            base_url = "https://api.openai.com/v1"
+        model_name = getattr(self.cfg, "llm_api_model", "gpt-4o-mini")
+
+        client = OpenAI(api_key=self.api_key, base_url=base_url)
 
         result = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model_name,
             messages=messages,  # type: ignore
             n=n_completions,
             max_tokens=max_tokens,
@@ -682,6 +689,9 @@ def create_config_and_selected_saes(
     config = AutoInterpEvalConfig(
         model_name=args.model_name,
     )
+    # Add API model and local flag to config for later use
+    config.llm_api_model = getattr(args, "llm_api_model", "gpt-4o-mini")
+    config.local_api = getattr(args, "local", False)
 
     if args.llm_batch_size is not None:
         config.llm_batch_size = args.llm_batch_size
@@ -772,6 +782,17 @@ def arg_parser():
         default=None,
         choices=[None, "float32", "float64", "float16", "bfloat16"],
         help="Data type for LLM. If None, will be populated using LLM_NAME_TO_DTYPE",
+    )
+    parser.add_argument(
+        "--llm_api_model",
+        type=str,
+        default="gpt-4o-mini",
+        help="Model name for the LLM API (e.g., gpt-4o, gpt-3.5-turbo, etc.)",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="If set, use the localhost URL for the OpenAI-compatible API endpoint.",
     )
 
     return parser

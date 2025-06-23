@@ -79,6 +79,16 @@ class AutoInterpEvalConfig:
         title="LLM Data Type",
         description="LLM data type. This is set by default in the main script, or it can be set with a command line argument.",
     )
+    llm_api_model: str = Field(
+        default="gpt-4o-mini",
+        title="LLM API Model",
+        description="Model name for the LLM API (e.g., gpt-4o, gpt-3.5-turbo, etc.)",
+    )
+    local_api: bool = Field(
+        default=False,
+        title="Local API",
+        description="If set, use the localhost URL for the OpenAI-compatible API endpoint.",
+    )
 
     # Main autointerp params
     buffer: int = Field(
