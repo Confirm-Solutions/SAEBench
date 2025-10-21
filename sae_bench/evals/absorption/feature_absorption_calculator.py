@@ -142,7 +142,9 @@ class FeatureAbsorptionCalculator:
         results: list[WordAbsorptionResult] = []
         cos_sims = (
             torch.nn.functional.cosine_similarity(
-                probe_direction.to(sae.device), sae.W_dec, dim=-1
+                probe_direction.to(sae.device),
+                sae.W_dec if hasattr(sae, "W_dec") else sae.dictionary.T,
+                dim=-1,
             )
             .float()
             .cpu()
@@ -153,7 +155,11 @@ class FeatureAbsorptionCalculator:
                 [p.base for p in batch_prompts],
                 names_filter=[hook_point],
             )[1][hook_point][:, self.word_token_pos, :]
-            batch_sae_acts = sae.encode(batch_acts)
+            batch_sae_acts: torch.Tensor | None = None
+            if hasattr(sae, "W_dec"):
+                batch_sae_acts = sae.encode(batch_acts)
+            elif hasattr(sae, "dictionary"):
+                _, batch_sae_acts = sae.encode_ridge(batch_acts)
             batch_sae_probe_projections = batch_sae_acts * cos_sims.to(
                 batch_sae_acts.device
             )

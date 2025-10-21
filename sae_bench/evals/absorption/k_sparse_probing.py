@@ -1,7 +1,6 @@
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -100,7 +99,11 @@ def _get_sae_acts(
 ) -> torch.Tensor:
     batch_acts = []
     for batch in batchify(input_activations, batch_size):
-        acts = sae.encode(batch.to(device=sae.device, dtype=sae.dtype))
+        acts = (
+            sae.encode(batch.to(device=sae.device, dtype=sae.dtype))
+            if sae.cfg.architecture == "standard"
+            else sae.encode_ridge(batch.to(device=sae.device, dtype=sae.dtype))[1]
+        )
         if sparse_feat_ids is not None:
             acts = acts[:, sparse_feat_ids]
         batch_acts.append(acts.cpu())
@@ -135,7 +138,9 @@ def train_k_sparse_probes(
             num_epochs=num_epochs,
             batch_size=batch_size,
             device=sae.device,
-            map_acts=lambda acts: sae.encode(acts.to(sae.device, dtype=sae.dtype)),
+            map_acts=lambda acts: sae.encode(acts.to(sae.device, dtype=sae.dtype))
+            if sae.cfg.architecture == "standard"
+            else sae.encode_ridge(acts.to(sae.device, dtype=sae.dtype))[1],
             probe_dim=sae.cfg.d_sae,
         )
         .float()
@@ -180,25 +185,47 @@ def sae_k_sparse_metadata(
     sae_name: str,
     layer: int,
 ) -> pd.DataFrame:
-    norm_probe_weights = probe.weights / torch.norm(probe.weights, dim=-1, keepdim=True)
-    norm_W_enc = sae.W_enc / torch.norm(sae.W_enc, dim=0, keepdim=True)
-    norm_W_dec = sae.W_dec / torch.norm(sae.W_dec, dim=-1, keepdim=True)
-    probe_dec_cos = (
-        (
-            norm_probe_weights.to(dtype=norm_W_dec.dtype, device=norm_W_dec.device)
-            @ norm_W_dec.T
+    probe_enc_cos, probe_dec_cos, probe_dict_cos = None, None, None
+
+    if hasattr("sae", "dictionary"):
+        norm_probe_weights = probe.weights / torch.norm(
+            probe.weights, dim=-1, keepdim=True
         )
-        .cpu()
-        .float()
-    )
-    probe_enc_cos = (
-        (
-            norm_probe_weights.to(dtype=norm_W_enc.dtype, device=norm_W_enc.device)
-            @ norm_W_enc
+        norm_dictionary = sae.dictionary / torch.norm(
+            sae.dictionary, dim=0, keepdim=True
         )
-        .cpu()
-        .float()
-    )
+        probe_dict_cos = (
+            (
+                norm_probe_weights.to(
+                    dtype=norm_dictionary.dtype, device=norm_dictionary.device
+                )
+                @ norm_dictionary.T
+            )
+            .cpu()
+            .float()
+        )
+    elif hasattr(sae, "W_enc") and hasattr(sae, "W_dec"):
+        norm_probe_weights = probe.weights / torch.norm(
+            probe.weights, dim=-1, keepdim=True
+        )
+        norm_W_enc = sae.W_enc / torch.norm(sae.W_enc, dim=0, keepdim=True)
+        norm_W_dec = sae.W_dec / torch.norm(sae.W_dec, dim=-1, keepdim=True)
+        probe_dec_cos = (
+            (
+                norm_probe_weights.to(dtype=norm_W_dec.dtype, device=norm_W_dec.device)
+                @ norm_W_dec.T
+            )
+            .cpu()
+            .float()
+        )
+        probe_enc_cos = (
+            (
+                norm_probe_weights.to(dtype=norm_W_enc.dtype, device=norm_W_enc.device)
+                @ norm_W_enc
+            )
+            .cpu()
+            .float()
+        )
 
     metadata: dict[str, float | str | float | np.ndarray] = {
         "layer": layer,
@@ -212,12 +239,18 @@ def sae_k_sparse_metadata(
             row["letter"] = letter
             row["k"] = k
             row["feats"] = k_probe.feature_ids.numpy()
-            row["cos_probe_sae_enc"] = probe_enc_cos[
-                letter_i, k_probe.feature_ids
-            ].numpy()
-            row["cos_probe_sae_dec"] = probe_dec_cos[
-                letter_i, k_probe.feature_ids
-            ].numpy()
+            if probe_enc_cos is not None:
+                row["cos_probe_sae_enc"] = probe_enc_cos[
+                    letter_i, k_probe.feature_ids
+                ].numpy()
+            if probe_dec_cos is not None:
+                row["cos_probe_sae_dec"] = probe_dec_cos[
+                    letter_i, k_probe.feature_ids
+                ].numpy()
+            if probe_dict_cos is not None:
+                row["cos_prob_dictionary"] = probe_dict_cos[
+                    letter_i, k_probe.feature_ids
+                ].numpy()
             row["weights"] = k_probe.weight.float().numpy()
             row["bias"] = k_probe.bias.item()
             rows.append(row)
@@ -385,8 +418,18 @@ def build_metrics_df(results_df, metadata_df, max_k_value: int):
                 (metadata_df["letter"] == letter) & (metadata_df["k"] == k)
             ]
             auc_info[f"sparse_sae_k_{k}_feats"] = meta_row["feats"].iloc[0]
-            auc_info[f"cos_probe_sae_enc_k_{k}"] = meta_row["cos_probe_sae_enc"].iloc[0]
-            auc_info[f"cos_probe_sae_dec_k_{k}"] = meta_row["cos_probe_sae_dec"].iloc[0]
+            if "cos_probe_sae_enc" in meta_row:
+                auc_info[f"cos_probe_sae_enc_k_{k}"] = meta_row[
+                    "cos_probe_sae_enc"
+                ].iloc[0]
+            if "cos_probe_sae_dec" in meta_row:
+                auc_info[f"cos_probe_sae_dec_k_{k}"] = meta_row[
+                    "cos_probe_sae_dec"
+                ].iloc[0]
+            if "cos_prob_dictionary" in meta_row:
+                auc_info[f"cos_prob_dictionary_k_{k}"] = meta_row[
+                    "cos_prob_dictionary"
+                ].iloc[0]
             auc_info[f"sparse_sae_k_{k}_weights"] = meta_row["weights"].iloc[0]
             auc_info[f"sparse_sae_k_{k}_bias"] = meta_row["bias"].iloc[0]
             auc_info["layer"] = meta_row["layer"].iloc[0]

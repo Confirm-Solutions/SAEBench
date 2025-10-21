@@ -3,7 +3,8 @@ import os
 import random
 import re
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pandas as pd
 import torch
@@ -146,12 +147,14 @@ def load_and_format_sae(
             device=device,
         )
         sae_id = sae_object_or_sae_lens_id
-        sae.fold_W_dec_norm()
+        if hasattr(sae, "W_dec"):
+            sae.fold_W_dec_norm()
     else:
         sae = sae_object_or_sae_lens_id
         sae_id = "custom_sae"
         sparsity = None
-        check_decoder_norms(sae.W_dec.data)
+        if hasattr(sae, "W_dec"):
+            check_decoder_norms(sae.W_dec.data)
 
     return sae_id, sae, sparsity
 
