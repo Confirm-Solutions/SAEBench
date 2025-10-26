@@ -189,7 +189,14 @@ def collect_sae_activations(
         )
         resid_BLD: Float[torch.Tensor, "batch seq_len d_model"] = cache[hook_name]
 
-        sae_act_BLF: Float[torch.Tensor, "batch seq_len d_sae"] = sae.encode(resid_BLD)
+        try:
+            sae_act_BLF: Float[torch.Tensor, "batch seq_len d_sae"] = sae.encode(
+                resid_BLD
+            )
+        except Exception:
+            sae_act_BLF = sae.encode_ridge(
+                resid_BLD.view(-1, resid_BLD.shape[-1])
+            ).view(resid_BLD.shape[0], resid_BLD.shape[1], -1)
 
         if selected_latents is not None:
             sae_act_BLF = sae_act_BLF[:, :, selected_latents]
@@ -226,7 +233,11 @@ def get_feature_activation_sparsity(
     """Get the activation sparsity for each SAE feature.
     Note: If evaluating many SAEs, it is more efficient to use save_activations() and get the sparsity from the saved activations."""
     device = sae.device
-    running_sum_F = torch.zeros(sae.W_dec.shape[0], dtype=torch.float32, device=device)
+    running_sum_F = torch.zeros(
+        (sae.W_dec if hasattr(sae, "W_dec") else sae.dictionary).shape[0],
+        dtype=torch.float32,
+        device=device,
+    )
     total_tokens = 0
 
     for i in tqdm(range(0, tokens.shape[0], batch_size)):
@@ -236,7 +247,15 @@ def get_feature_activation_sparsity(
         )
         resid_BLD: Float[torch.Tensor, "batch seq_len d_model"] = cache[hook_name]
 
-        sae_act_BLF: Float[torch.Tensor, "batch seq_len d_sae"] = sae.encode(resid_BLD)
+        try:
+            sae_act_BLF: Float[torch.Tensor, "batch seq_len d_sae"] = sae.encode(
+                resid_BLD
+            )
+        except Exception:
+            sae_act_BLF = sae.encode_ridge(
+                resid_BLD.view(-1, resid_BLD.shape[-1])
+            ).view(resid_BLD.shape[0], resid_BLD.shape[1], -1)
+
         # make act to zero or one
         sae_act_BLF = (sae_act_BLF > 0).to(dtype=torch.float32)
 
@@ -304,7 +323,12 @@ def get_sae_meaned_activations(
 
         for i in range(0, len(all_acts_BLD), sae_batch_size):
             acts_BLD = all_acts_BLD[i : i + sae_batch_size]
-            acts_BLF = sae.encode(acts_BLD)
+            if sae.cfg.architecture == "ridge":
+                acts_BLF = sae.encode_ridge(acts_BLD.view(-1, acts_BLD.shape[-1])).view(
+                    acts_BLD.shape[0], acts_BLD.shape[1], -1
+                )
+            else:
+                acts_BLF = sae.encode(acts_BLD)
 
             activations_BL = einops.reduce(acts_BLD, "B L D -> B L", "sum")
             nonzero_acts_BL = (activations_BL != 0.0).to(dtype=dtype)

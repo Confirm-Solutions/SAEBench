@@ -752,7 +752,7 @@ def arg_parser():
     parser.add_argument(
         "--sae_block_pattern",
         type=str,
-        required=True,
+        required=False,
         help="Regex pattern for SAE block selection",
     )
     parser.add_argument(

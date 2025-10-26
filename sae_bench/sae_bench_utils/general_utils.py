@@ -138,7 +138,8 @@ def load_and_format_sae(
         sae = SAE.load_from_disk(sae_release_or_unique_id, device=device)
         sae_id = "local_sae"
         sparsity = None
-        check_decoder_norms(sae.W_dec.data)
+        if hasattr(sae, "W_dec"):
+            check_decoder_norms(sae.W_dec.data)
         return sae_id, sae, sparsity
     elif isinstance(sae_object_or_sae_lens_id, str):
         sae, _, sparsity = SAE.from_pretrained(

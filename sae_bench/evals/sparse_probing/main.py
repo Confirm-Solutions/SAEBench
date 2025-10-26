@@ -420,34 +420,40 @@ def create_config_and_selected_saes(
     if args.lower_vram_usage:
         config.lower_vram_usage = True
 
-    selected_saes = get_saes_from_regex(args.sae_regex_pattern, args.sae_block_pattern)
-    assert len(selected_saes) > 0, "No SAEs selected"
+    # Check if sae_path is a local file path or a regex pattern for pretrained SAEs
+    if os.path.exists(args.sae_path):
+        # Local SAE path
+        print(f"Using local SAE from: {args.sae_path}")
+        selected_saes = [(args.sae_path, "local_sae")]
+    else:
+        # Pretrained SAE regex pattern
+        print(f"Using pretrained SAE regex pattern: {args.sae_path}")
+        selected_saes = get_saes_from_regex(args.sae_path, args.sae_block_pattern)
+        assert len(selected_saes) > 0, "No SAEs selected"
 
-    releases = set([release for release, _ in selected_saes])
+        releases = set([release for release, _ in selected_saes])
+        print(f"Selected SAEs from releases: {releases}")
 
-    print(f"Selected SAEs from releases: {releases}")
-
-    for release, sae in selected_saes:
-        print(f"Sample SAEs: {release}, {sae}")
+        for release, sae in selected_saes:
+            print(f"Sample SAEs: {release}, {sae}")
 
     return config, selected_saes
 
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="Run sparse probing evaluation")
+    parser.add_argument(
+        "sae_path",
+        type=str,
+        help="Path to local SAE file or regex pattern to match SAE names for pretrained SAEs.",
+    )
     parser.add_argument("--random_seed", type=int, default=None, help="Random seed")
     parser.add_argument("--model_name", type=str, required=True, help="Model name")
     parser.add_argument(
-        "--sae_regex_pattern",
-        type=str,
-        required=True,
-        help="Regex pattern for SAE selection",
-    )
-    parser.add_argument(
         "--sae_block_pattern",
         type=str,
-        required=True,
-        help="Regex pattern for SAE block selection",
+        default=".*",
+        help="Regex pattern to match SAE block names. Only used for pretrained SAEs. Defaults to match all blocks.",
     )
     parser.add_argument(
         "--output_folder",
@@ -504,11 +510,18 @@ def arg_parser():
 
 if __name__ == "__main__":
     """
-    python -m sae_bench.evals.sparse_probing.main \
-    --sae_regex_pattern "sae_bench_pythia70m_sweep_standard_ctx128_0712" \
-    --sae_block_pattern "blocks.4.hook_resid_post__trainer_10" \
-    --model_name pythia-70m-deduped
-
+    Examples:
+    
+    # Using a local SAE file:
+    python -m sae_bench.evals.sparse_probing.main "/path/to/your/sae.pt" \
+        --model_name pythia-70m-deduped \
+        --verbose
+    
+    # Using pretrained SAEs with regex patterns:
+    python -m sae_bench.evals.sparse_probing.main "sae_bench_pythia70m_sweep_standard_ctx128_0712" \
+        --sae_block_pattern "blocks.4.hook_resid_post__trainer_10" \
+        --model_name pythia-70m-deduped \
+        --verbose
 
     """
     args = arg_parser().parse_args()

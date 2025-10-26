@@ -7,7 +7,9 @@ import logging
 import math
 import os
 import subprocess
+import sys
 import time
+import traceback
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -17,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import einops
+import numpy as np
 import torch
 from sae_lens.sae import SAE
 from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
@@ -249,6 +252,10 @@ def run_evals(
         feature_metrics = {}
 
     if eval_config.compute_featurewise_weight_based_metrics:
+        if sae.cfg.architecture == "ridge":
+            raise ValueError(
+                "Featurewise weight based metrics are not supported for ridge SAEs."
+            )
         feature_metrics |= get_featurewise_weight_based_metrics(sae)
 
     if len(all_metrics) == 0:
@@ -522,8 +529,21 @@ def get_sparsity_and_variance_metrics(
             original_act = activation_store.apply_norm_scaling_factor(original_act)
 
         # send the (maybe normalised) activations into the SAE
-        sae_feature_activations = sae.encode(original_act.to(sae.device))
-        sae_out = sae.decode(sae_feature_activations).to(original_act.device)
+        if sae.cfg.architecture == "ridge":
+            reconstruction, sae_feature_activations = sae.encode_ridge(
+                original_act.view(-1, sae.cfg.d_in), return_reconstruction=True
+            )
+            sae_feature_activations = sae_feature_activations.to(sae.device).view(
+                original_act.shape[0], original_act.shape[1], sae.cfg.d_sae
+            )
+            reconstruction = reconstruction.view(
+                original_act.shape[0], original_act.shape[1], sae.cfg.d_in
+            )
+            sae_out = sae.decode_ridge(reconstruction).to(original_act.device)
+        else:
+            sae_feature_activations = sae.encode(original_act.to(sae.device))
+            sae_out = sae.decode(sae_feature_activations).to(original_act.device)
+
         del cache
 
         if activation_store.normalize_activations == "expected_average_only_in":
@@ -684,9 +704,20 @@ def get_recons_loss(
             activations = activation_store.apply_norm_scaling_factor(activations)
 
         # SAE class agnost forward forward pass.
-        reconstructed_activations = sae.decode(sae.encode(activations)).to(
-            activations.dtype
-        )
+        if sae.cfg.architecture == "ridge":
+            reconstructed_activations = (
+                sae.decode_ridge(
+                    sae.encode_ridge(
+                        activations.view(-1, sae.cfg.d_in), return_reconstruction=True
+                    )[0]
+                )
+                .to(activations.dtype)
+                .view(activations.shape[0], activations.shape[1], sae.cfg.d_in)
+            )
+        else:
+            reconstructed_activations = sae.decode(sae.encode(activations)).to(
+                activations.dtype
+            )
 
         # Unscale if activations were scaled prior to going into the SAE
         if activation_store.normalize_activations == "expected_average_only_in":
@@ -709,9 +740,14 @@ def get_recons_loss(
             activations = activation_store.apply_norm_scaling_factor(activations)
 
         # SAE class agnost forward forward pass.
-        new_activations = sae.decode(sae.encode(activations.flatten(-2, -1))).to(
-            activations.dtype
-        )
+        if sae.cfg.architecture == "ridge":
+            new_activations = sae.decode_ridge(
+                sae.encode_ridge(activations.view(-1, sae.cfg.d_in))
+            ).to(activations.dtype)
+        else:
+            new_activations = sae.decode(sae.encode(activations.flatten(-2, -1))).to(
+                activations.dtype
+            )
 
         new_activations = new_activations.reshape(
             activations.shape
@@ -740,9 +776,14 @@ def get_recons_loss(
         new_activations = activations.clone()
 
         # Only reconstruct the specified head
-        head_activations = sae.decode(sae.encode(activations[:, :, head_index])).to(
-            activations.dtype
-        )
+        if sae.cfg.architecture == "ridge":
+            head_activations = sae.decode_ridge(
+                sae.encode_ridge(activations[:, :, head_index])
+            ).to(activations.dtype)
+        else:
+            head_activations = sae.decode(sae.encode(activations[:, :, head_index])).to(
+                activations.dtype
+            )
 
         # Apply mask only to the reconstructed head
         masked_head_activations = torch.where(
@@ -875,15 +916,21 @@ def convert_feature_metrics(
                     encoder_bias=round(
                         flattened_feature_metrics["encoder_bias"][i],
                         DEFAULT_FLOAT_PRECISION,
-                    ),
+                    )
+                    if "encoder_bias" in flattened_feature_metrics
+                    else np.nan,
                     encoder_decoder_cosine_sim=round(
                         flattened_feature_metrics["encoder_decoder_cosine_sim"][i],
                         DEFAULT_FLOAT_PRECISION,
-                    ),
+                    )
+                    if "encoder_decoder_cosine_sim" in flattened_feature_metrics
+                    else np.nan,
                     encoder_norm=round(
                         flattened_feature_metrics["encoder_norm"][i],
                         DEFAULT_FLOAT_PRECISION,
-                    ),
+                    )
+                    if "encoder_norm" in flattened_feature_metrics
+                    else np.nan,
                     feature_density=round(
                         flattened_feature_metrics["feature_density"][i],
                         DEFAULT_FLOAT_PRECISION,
@@ -891,11 +938,15 @@ def convert_feature_metrics(
                     max_decoder_cosine_sim=round(
                         flattened_feature_metrics["max_decoder_cosine_sim"][i],
                         DEFAULT_FLOAT_PRECISION,
-                    ),
+                    )
+                    if "max_decoder_cosine_sim" in flattened_feature_metrics
+                    else np.nan,
                     max_encoder_cosine_sim=round(
                         flattened_feature_metrics["max_encoder_cosine_sim"][i],
                         DEFAULT_FLOAT_PRECISION,
-                    ),
+                    )
+                    if "max_encoder_cosine_sim" in flattened_feature_metrics
+                    else np.nan,
                 )
             )
     return feature_metrics_by_feature
@@ -956,13 +1007,21 @@ def save_single_eval_result(
     return json_path
 
 
-def calculate_misc_metrics(feature_metrics: dict[str, torch.Tensor]) -> dict:
-    average_max_encoder_cosine_sim = (
-        torch.Tensor(feature_metrics["max_encoder_cosine_sim"]).mean().item()
-    )
-    average_max_decoder_cosine_sim = (
-        torch.Tensor(feature_metrics["max_decoder_cosine_sim"]).mean().item()
-    )
+def calculate_misc_metrics(
+    feature_metrics: dict[str, torch.Tensor],
+) -> dict[str, float]:
+    if "max_encoder_cosine_sim" in feature_metrics:
+        average_max_encoder_cosine_sim = (
+            torch.Tensor(feature_metrics["max_encoder_cosine_sim"]).mean().item()
+        )
+    else:
+        average_max_encoder_cosine_sim = np.nan
+    if "max_decoder_cosine_sim" in feature_metrics:
+        average_max_decoder_cosine_sim = (
+            torch.Tensor(feature_metrics["max_decoder_cosine_sim"]).mean().item()
+        )
+    else:
+        average_max_decoder_cosine_sim = np.nan
 
     feature_densities_F = torch.Tensor(feature_metrics["feature_density"])
     feature_densities_F = feature_densities_F.float().clone().detach()
@@ -1040,7 +1099,7 @@ def multiple_evals(
     for sae_release, sae_object_or_id in tqdm(
         selected_saes, desc="Running SAE evaluation on all selected SAEs"
     ):
-        sae_id, sae, sparsity = general_utils.load_and_format_sae(
+        sae_id, sae, _ = general_utils.load_and_format_sae(
             sae_release, sae_object_or_id, device
         )  # type: ignore
         sae = sae.to(device=device, dtype=llm_dtype)
@@ -1067,7 +1126,9 @@ def multiple_evals(
                 return HookedTransformer.from_pretrained_no_processing(
                     sae.cfg.model_name,
                     device=device,
-                    dtype=sae.W_enc.dtype,
+                    dtype=sae.W_enc.dtype
+                    if hasattr(sae, "W_enc")
+                    else sae.dictionary.dtype,
                     **sae.cfg.model_from_pretrained_kwargs,
                 )
 
@@ -1077,6 +1138,7 @@ def multiple_evals(
                 current_model = load_model()
             except Exception as e:
                 logger.error(f"Failed to load model {sae.cfg.model_name}: {str(e)}")
+                logger.error(f"Stack trace:\n{traceback.format_exc()}")
                 continue  # Skip this SAE and continue with the next one
 
         assert current_model is not None  # type: ignore
@@ -1170,6 +1232,7 @@ def multiple_evals(
                 f"Failed to evaluate SAE {sae_id} from {sae_release} "
                 f"with context length {context_size} on dataset {dataset}: {str(e)}"
             )
+            logger.error(f"Stack trace:\n{traceback.format_exc()}")
             continue  # Skip this combination and continue with the next one
 
         gc.collect()
@@ -1179,30 +1242,40 @@ def multiple_evals(
 
 def run_evaluations(args: argparse.Namespace) -> list[dict[str, Any]]:
     device = general_utils.setup_environment()
-    # Filter SAEs based on regex patterns
-    filtered_saes = sae_selection_utils.get_saes_from_regex(
-        args.sae_regex_pattern, args.sae_block_pattern
-    )
 
-    # print the filtered SAEs
-    print("Filtered SAEs based on provided patterns:")
-    for sae in filtered_saes:
-        print(sae)
+    # Check if sae_path is a local file path or a regex pattern for pretrained SAEs
+    if os.path.exists(args.sae_path):
+        # Local SAE path
+        print(f"Using local SAE from: {args.sae_path}")
+        selected_saes = [(args.sae_path, "local_sae")]
+    else:
+        # Pretrained SAE regex pattern
+        print(f"Using pretrained SAE regex pattern: {args.sae_path}")
+        filtered_saes = sae_selection_utils.get_saes_from_regex(
+            args.sae_path, args.sae_block_pattern
+        )
 
-    num_sae_sets = len(set(sae_set for sae_set, _ in filtered_saes))
-    num_all_sae_ids = len(filtered_saes)
+        # print the filtered SAEs
+        print("Filtered SAEs based on provided patterns:")
+        for sae in filtered_saes:
+            print(sae)
 
-    print("Filtered SAEs based on provided patterns:")
-    print(f"Number of SAE sets: {num_sae_sets}")
-    print(f"Total number of SAE IDs: {num_all_sae_ids}")
+        num_sae_sets = len(set(sae_set for sae_set, _ in filtered_saes))
+        num_all_sae_ids = len(filtered_saes)
+
+        print("Filtered SAEs based on provided patterns:")
+        print(f"Number of SAE sets: {num_sae_sets}")
+        print(f"Total number of SAE IDs: {num_all_sae_ids}")
+
+        selected_saes = filtered_saes
 
     eval_results = multiple_evals(
-        selected_saes=filtered_saes,
+        selected_saes=selected_saes,
         n_eval_reconstruction_batches=args.n_eval_reconstruction_batches,
         n_eval_sparsity_variance_batches=args.n_eval_sparsity_variance_batches,
         eval_batch_size_prompts=args.batch_size_prompts,
-        compute_featurewise_density_statistics=True,  # TODO: Don't hardcode this
-        compute_featurewise_weight_based_metrics=True,
+        compute_featurewise_density_statistics=args.compute_featurewise_density_statistics,
+        compute_featurewise_weight_based_metrics=args.compute_featurewise_weight_based_metrics,
         exclude_special_tokens_from_reconstruction=args.exclude_special_tokens_from_reconstruction,
         dataset=args.dataset,
         context_size=args.context_size,
@@ -1230,20 +1303,21 @@ def replace_nans_with_negative_one(obj: Any) -> Any:
 def arg_parser():
     parser = argparse.ArgumentParser(description="Run core evaluation")
     parser.add_argument(
+        "sae_path",
+        type=str,
+        help="Path to local SAE file or regex pattern to match SAE names for pretrained SAEs.",
+    )
+    parser.add_argument(
+        "--sae_block_pattern",
+        type=str,
+        default=".*",
+        help="Regex pattern to match SAE block names. Only used for pretrained SAEs. Defaults to match all blocks.",
+    )
+    parser.add_argument(
         "--model_name",
         type=str,
         default="",
         help="Model name. Currently this flag is ignored and the model name is inferred from sae.cfg.model_name.",
-    )
-    parser.add_argument(
-        "sae_regex_pattern",
-        type=str,
-        help="Regex pattern to match SAE names. Can be an entire SAE name to match a specific SAE.",
-    )
-    parser.add_argument(
-        "sae_block_pattern",
-        type=str,
-        help="Regex pattern to match SAE block names. Can be an entire block name to match a specific block.",
     )
     parser.add_argument(
         "--batch_size_prompts",
@@ -1260,12 +1334,14 @@ def arg_parser():
     parser.add_argument(
         "--compute_kl",
         action="store_true",
-        help="Compute KL divergence.",
+        default=True,
+        help="Compute KL divergence. Enabled by default.",
     )
     parser.add_argument(
         "--compute_ce_loss",
         action="store_true",
-        help="Compute cross-entropy loss.",
+        default=True,
+        help="Compute cross-entropy loss. Enabled by default.",
     )
     parser.add_argument(
         "--n_eval_sparsity_variance_batches",
@@ -1276,27 +1352,32 @@ def arg_parser():
     parser.add_argument(
         "--compute_l2_norms",
         action="store_true",
-        help="Compute L2 norms.",
+        default=True,
+        help="Compute L2 norms. Enabled by default.",
     )
     parser.add_argument(
         "--compute_sparsity_metrics",
         action="store_true",
-        help="Compute sparsity metrics.",
+        default=True,
+        help="Compute sparsity metrics. Enabled by default.",
     )
     parser.add_argument(
         "--compute_variance_metrics",
         action="store_true",
-        help="Compute variance metrics.",
+        default=True,
+        help="Compute variance metrics. Enabled by default.",
     )
     parser.add_argument(
         "--compute_featurewise_density_statistics",
         action="store_true",
-        help="Compute featurewise density statistics.",
+        default=True,
+        help="Compute featurewise density statistics. Enabled by default.",
     )
     parser.add_argument(
         "--compute_featurewise_weight_based_metrics",
         action="store_true",
-        help="Compute featurewise weight-based metrics.",
+        default=False,
+        help="Compute featurewise weight-based metrics. Enabled by default.",
     )
     parser.add_argument(
         "--exclude_special_tokens_from_reconstruction",
@@ -1341,26 +1422,47 @@ def arg_parser():
 
 if __name__ == "__main__":
     """
-    python evals/core/main.py "sae_bench_pythia70m_sweep_standard_ctx128_0712" "blocks.4.hook_resid_post__trainer_10" \
-    --batch_size_prompts 16 \
-    --n_eval_sparsity_variance_batches 2000 \
-    --n_eval_reconstruction_batches 200 \
-    --output_folder "eval_results/core" \
-    --exclude_special_tokens_from_reconstruction --verbose
+    Examples:
+    
+    # Using a local SAE file (all metrics enabled by default):
+    python evals/core/main.py "/path/to/your/sae.pt" --verbose
+    
+    # Using a local SAE with custom settings:
+    python evals/core/main.py "/path/to/your/sae.pt" \
+        --batch_size_prompts 8 \
+        --n_eval_reconstruction_batches 50 \
+        --n_eval_sparsity_variance_batches 10 \
+        --output_folder "my_results" \
+        --verbose
+    
+    # Using pretrained SAEs with regex patterns:
+    python evals/core/main.py "sae_bench_pythia70m_sweep_standard_ctx128_0712" \
+        --sae_block_pattern "blocks.4.hook_resid_post__trainer_10" \
+        --batch_size_prompts 16 \
+        --n_eval_sparsity_variance_batches 2000 \
+        --n_eval_reconstruction_batches 200 \
+        --output_folder "eval_results/core" \
+        --exclude_special_tokens_from_reconstruction --verbose
 
-    python evals/core/main.py "sae_bench_gemma-2-2b_topk_width-2pow14_date-1109" "blocks.19.hook_resid_post__trainer_2" \
-    --batch_size_prompts 16 \
-    --n_eval_sparsity_variance_batches 2000 \
-    --n_eval_reconstruction_batches 200 \
-    --output_folder "eval_results/core" \
-    --exclude_special_tokens_from_reconstruction --verbose --llm_dtype bfloat16
+    python evals/core/main.py "sae_bench_gemma-2-2b_topk_width-2pow14_date-1109" \
+        --sae_block_pattern "blocks.19.hook_resid_post__trainer_2" \
+        --batch_size_prompts 16 \
+        --n_eval_sparsity_variance_batches 2000 \
+        --n_eval_reconstruction_batches 200 \
+        --output_folder "eval_results/core" \
+        --exclude_special_tokens_from_reconstruction --verbose --llm_dtype bfloat16
     """
-    args = arg_parser().parse_args()
-    eval_results = run_evaluations(args)
+    try:
+        args = arg_parser().parse_args()
+        eval_results = run_evaluations(args)
 
-    print("Evaluation complete. All results have been saved incrementally.")  # type: ignore
-    # print(f"Combined JSON: {output_files['combined_json']}")
-    # print(f"CSV: {output_files['csv']}")
+        print("Evaluation complete. All results have been saved incrementally.")  # type: ignore
+        # print(f"Combined JSON: {output_files['combined_json']}")
+        # print(f"CSV: {output_files['csv']}")
+    except Exception as e:
+        logger.error(f"Fatal error in main execution: {str(e)}")
+        logger.error(f"Stack trace:\n{traceback.format_exc()}")
+        sys.exit(1)
 
 
 # Use this code snippet to use custom SAE objects
